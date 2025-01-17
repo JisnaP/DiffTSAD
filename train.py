@@ -8,7 +8,7 @@ from args_ld import get_parser
 from utils import *
 from LatentDiffusionModel import LatentDiffusion
 from predict_anomalies import Predictor
-from train import Trainer
+from training import Trainer
 from anomaly_scores_loader import AnomalyScoreLoader
 if __name__ == "__main__":
 
