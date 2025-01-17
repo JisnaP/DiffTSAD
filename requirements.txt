@@ -1,0 +1,10 @@
+numpy
+pandas
+matplotlib
+scikit-learn
+black
+pre-commit
+tqdm
+tensorboard
+more_itertools
+torch

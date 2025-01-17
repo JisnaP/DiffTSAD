@@ -14,7 +14,7 @@ class Trainer:
         window_size,
         n_features,
         target_dims=None,
-        n_epochs=2,
+        n_epochs=30,
         batch_size=256,
         init_lr=0.001,
         forecast_criterion=nn.MSELoss(),

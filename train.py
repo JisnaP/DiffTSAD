@@ -1,213 +1,213 @@
-import os
-import time
-import numpy as np
+import json
 import torch
+from datetime import datetime
 import torch.nn as nn
-from torch.utils.tensorboard import SummaryWriter
-from tqdm.auto import tqdm
-from tqdm.auto import tqdm
+import os
+from plotting import *
+from args_ld import get_parser
+from utils import *
+from LatentDiffusionModel import LatentDiffusion
+from predict_anomalies import Predictor
+from train import Trainer
+from anomaly_scores_loader import AnomalyScoreLoader
+if __name__ == "__main__":
 
-class Trainer:
-    """Trainer class for LatentDiffusionModel model.
+    id = datetime.now().strftime("%d%m%Y_%H%M%S")
 
-    :param model: LatentDiffusion model
-    :param optimizer: Optimizer used to minimize the loss function
-    :param window_size: Length of the input sequence
-    :param n_features: Number of input features
-    :param target_dims: dimension of input features to forecast and reconstruct
-    :param n_epochs: Number of iterations/epochs
-    :param batch_size: Number of windows in a single batch
-    :param init_lr: Initial learning rate of the module
-    :param loss: diffusion loss.
-    :param boolean use_cuda: To be run on GPU or not
-    :param dload: Download directory where models are to be dumped
-    :param log_dir: Directory where SummaryWriter logs are written to
-    :param print_every: At what epoch interval to print losses
-    :param log_tensorboard: Whether to log loss++ to tensorboard
-    :param args_summary: Summary of args that will also be written to tensorboard if log_tensorboard
-    """
+    parser = get_parser()
+    args = parser.parse_args()
 
-    def __init__(
-        self,
+    dataset = args.dataset
+    window_size = args.lookback
+    spec_res = args.spec_res
+    normalize = args.normalize
+    n_epochs = args.epochs
+    batch_size = args.bs
+    init_lr = args.init_lr
+    shuffle_dataset = args.shuffle_dataset
+    use_cuda = args.use_cuda
+    print_every = args.print_every
+    log_tensorboard = args.log_tensorboard
+    group_index = args.group[0]
+    index = args.group[2:]
+    args_summary = str(args.__dict__)
+    print(args_summary)
+
+    if dataset == 'SMD':
+        output_path = f'output/SMD/{args.group}'
+        (X_train, _), (X_test, y_test) = get_data(f"machine-{group_index}-{index}", normalize=normalize)
+    elif dataset in ['MSL', 'SMAP']:
+        output_path = f'output/{dataset}'
+        (X_train, _), (X_test, y_test) = get_data(dataset, normalize=normalize)
+    else:
+        raise Exception(f'Dataset "{dataset}" not available.')
+
+    log_dir = f'{output_path}/logs'
+    if not os.path.exists(output_path):
+        os.makedirs(output_path)
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    save_path = f"{output_path}/{id}"
+
+    X_train = torch.from_numpy(X_train).float()
+    X_test = torch.from_numpy(X_test).float()
+    n_features = X_train.shape[1]
+    print(f"X_train shape:{X_train.shape}")
+    target_dims = get_target_dims(dataset)
+    
+    out_dim = n_features
+    N=X_train.shape[0]
+    train_dataset = SlidingWindowDataset(X_train, window_size, horizon=1,stride=1)
+    test_dataset = SlidingWindowDataset(X_test, window_size, horizon=1,stride=1)
+
+    train_loader, test_loader = create_data_loaders(
+        train_dataset, batch_size, shuffle=False, test_dataset=test_dataset
+    )
+    anomaly_loader = AnomalyScoreLoader(window_size=window_size, N=N)
+    file_path_train = 'DiffTSAD/output/SMD/1-1/anomaly_scores/train/anomaly_scores.pkl'
+    anomaly_scores_tensor_train = anomaly_loader.load_anomaly_scores(file_path_train)
+    
+    file_path_test = 'DiffTSAD/output/SMD/1-1/anomaly_scores/test/anomaly_scores.pkl'
+    anomaly_scores_tensor_test = anomaly_loader.load_anomaly_scores(file_path_test)
+    
+    # Normalize anomaly scores
+    normalized_anomaly_scores_train = anomaly_loader.normalize_anomaly_scores(anomaly_scores_tensor_train)
+    normalized_anomaly_scores_test = anomaly_loader.normalize_anomaly_scores(anomaly_scores_tensor_test)
+    
+    # Check the shapes and values after normalization
+    print(f"Normalized anomaly scores (train) shape: {normalized_anomaly_scores_train.shape}")
+    print(f"Min value (train) after normalization: {normalized_anomaly_scores_train.min()}")
+    print(f"Max value (train) after normalization: {normalized_anomaly_scores_train.max()}")
+    # Create anomaly_score Sliding window dataset
+    anomaly_score_dataset_train,anomaly_score_dataset_test=anomaly_loader.create_anomaly_score_dataset(
+      normalized_anomaly_scores_train,normalized_anomaly_scores_test=normalized_anomaly_scores_test)
+    
+    # Create DataLoaders
+    train_anomaly_score_loader, test_anomaly_score_loader = anomaly_loader.create_anomalyscores_loaders(
+      anomaly_score_dataset_train, 
+      batch_size, shuffle=False, 
+      anomaly_score_dataset_test=anomaly_score_dataset_test
+      )
+    print(f"Train DataLoader created with batch size: {batch_size}")
+    if test_loader is not None:
+        print(f"Test DataLoader created with batch size: {batch_size}")
+    for i,(X,y) in enumerate(train_anomaly_score_loader):
+      print(f"Shape of anomaly_score loaded:{X.shape}")
+      if i<1:
+        break
+    
+    for i,(X,y) in enumerate(train_loader):
+      print(f"shape of X_train loaded:{X.shape}")
+      if i<1:
+        break
+
+
+
+    model = LatentDiffusion(
+        n_features=n_features,
+        batch_size=batch_size,
+        window_size=window_size,
+        out_dim=out_dim,
+        time_steps=1,
+        noise_steps=1,
+        denoise_steps=1,
+        dim=64,
+        init_dim=64,
+        dim_mults=(1,2,4),
+        channels=24,
+        groups=8,
+        gru_n_layers=1,
+        n_layers=3,
+        schedule=args.schedule,
+        gru_hid_dim=args.gru_hid_dim,
+        kernel_size=args.kernel_size,
+        feat_gat_embed_dim=args.feat_gat_embed_dim,
+        time_gat_embed_dim=args.time_gat_embed_dim,
+        use_gatv2=args.use_gatv2, 
+        alpha=args.alpha
+    )
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.init_lr)
+    
+    
+
+    trainer = Trainer(
         model,
         optimizer,
         window_size,
         n_features,
-        target_dims=None,
-        n_epochs=30,
-        batch_size=32,
-        init_lr=0.001,
-        use_cuda=True,
-        dload="",
-        log_dir="output_ld/",
-        print_every=1,
-        log_tensorboard=True,
-        args_summary="",
-    ):
+        target_dims,
+        n_epochs,
+        batch_size,
+        init_lr,
+        use_cuda,
+        save_path,
+        log_dir,
+        print_every,
+        log_tensorboard,
+        args_summary
+    )
 
-        self.model = model
-        self.optimizer = optimizer
-        self.window_size = window_size
-        self.n_features = n_features
-        self.target_dims = target_dims
-        self.n_epochs = n_epochs
-        self.batch_size = batch_size
-        self.init_lr = init_lr
-        self.device = "cuda" if use_cuda and torch.cuda.is_available() else "cpu"
-        self.dload = dload
-        self.log_dir = log_dir
-        self.print_every = print_every
-        self.log_tensorboard = log_tensorboard
+    trainer.fit(train_loader,train_anomaly_score_loader )
 
-        self.losses = {
-            "train_total": []
-        }
-        self.epoch_times = []
+    plot_losses(trainer.losses, dataset)
 
-        if self.device == "cuda":
-            self.model.cuda()
-
-        if self.log_tensorboard:
-            self.writer = SummaryWriter(f"{log_dir}")
-            self.writer.add_text("args_summary", args_summary)
-
-    def fit(self, train_loader,anomaly_score_train_loader):
-        """Train model for self.n_epochs.
-        :train losses stored in self.losses
-
-        :param train_loader: train loader of input data
-        :param anomaly_score_train_loader: anomaly score loader of train data
-        """
-
-        init_train_loss = self.evaluate(train_loader,anomaly_score_train_loader)
-        print(f"Init total train loss: {init_train_loss:5f}")
-
-        
-        print(f"Training model for {self.n_epochs} epochs..")
-        train_start = time.time()
-        for epoch in tqdm(range(self.n_epochs)):
-            epoch_start = time.time()
-            # Training Mode
-            self.model.train()
-            
-            recon_losses = []
-
-            for (X,y) in tqdm(train_loader):
-                
-                X = X.to(self.device)
-                y = y.to(self.device)
-                print(f"Shape of X -: {X.shape}")
-                #X=X.permute(0,2,1)
-                #print(f"Shape of X input after permute: {X.shape}")
-                #t = torch.randint(0, self.time_steps, (X.shape[0],), device=X.device).long()
-                (anomaly_scores,_) = next(iter(anomaly_score_train_loader))
-                #print(f"Shape of anomaly_score:{anomaly_scores.shape}")
-                anomaly_scores=anomaly_scores.permute(0,2,1)
-                anomaly_scores=anomaly_scores.to(self.device)
-                #print(f"Shape of anomaly_score after permute:{anomaly_scores.shape}")
-                # Optimizer zero grad
-                self.optimizer.zero_grad()
-                if self.target_dims is not None:
-                    X = X[:, :, self.target_dims]
-                    y = y[:, :, self.target_dims].squeeze(-1)
-                # Forward pass
-                loss, recons = self.model(X,anomaly_scores)
-
-                # Loss backward
-                loss.backward()
-
-                #Optimizer step
-                self.optimizer.step()
-
-                recon_losses.append(loss.item()) 
-            recon_losses = np.array(recon_losses)
-
-            
-            recon_epoch_loss = np.sqrt((recon_losses ** 2).mean())
-
-            self.losses["train_total"].append(recon_epoch_loss)
-
-            if self.log_tensorboard:
-                self.write_loss(epoch)
-
-            epoch_time = time.time() - epoch_start
-            self.epoch_times.append(epoch_time)
-
-            if epoch % self.print_every == 0:
-                s = (
-                    f"[Epoch {epoch + 1}] "
-                    f"[Train_Loss: {recon_epoch_loss:.5f}]"
-                )
-
-            self.save(f"model.pt")
-
-        train_time = int(time.time() - train_start)
-        if self.log_tensorboard:
-            self.writer.add_text("total_train_time", str(train_time))
-        print(f"-- Training done in {train_time}s.")
+    # Check test loss
+    test_loss = trainer.evaluate(test_loader,test_anomaly_score_loader)
     
-    def evaluate(self, test_loader,anomaly_score_test_loader):
-        """Evaluate model
+    print(f"Test loss: {test_loss:.5f}")
 
-        :param data_loader: data loader of input data 
-        :param anomaly_score_loader:anomaly_score_loader of test data
-        :return test loss
-        """
+    # Some suggestions for POT args
+    level_q_dict = {
+        "SMAP": (0.90, 0.005),
+        "MSL": (0.90, 0.001),
+        "SMD-1": (0.9950, 0.001),
+        "SMD-2": (0.9925, 0.001),
+        "SMD-3": (0.9999, 0.001)
+    }
+    key = "SMD-" + args.group[0] if args.dataset == "SMD" else args.dataset
+    level, q = level_q_dict[key]
+    if args.level is not None:
+        level = args.level
+    if args.q is not None:
+        q = args.q
 
-        self.model.eval()
-        
-       
-        recon_losses = []
-        
-        with torch.no_grad():
-            for (X,y) in tqdm(test_loader):
-                X = X.to(self.device)
-                y = y.to(self.device)
-                #X=X.permute(0,2,1)
-                #t = torch.randint(0, self.time_steps, (X.shape[0],), device=X.device).long()
-               
-                (anomaly_scores,_) = next(iter(anomaly_score_test_loader))
-                print(anomaly_scores.shape)
-                anomaly_scores=anomaly_scores.permute(0,2,1)
-                anomaly_scores=anomaly_scores.to(self.device)
-                #  Forward pass and calculate loss
-                loss, recons = self.model(X,anomaly_scores)
+    # Some suggestions for Epsilon args
+    reg_level_dict = {"SMAP": 0, "MSL": 0, "SMD-1": 1, "SMD-2": 1, "SMD-3": 1}
+    key = "SMD-" + args.group[0] if dataset == "SMD" else dataset
+    reg_level = reg_level_dict[key]
 
-                if self.target_dims is not None:
-                    X = X[:, :, self.target_dims-1]
-                    y = y[:, :, self.target_dims-1].squeeze(-1)
+    trainer.load(f"{save_path}/model.pt")
+    prediction_args = {
+        'dataset': dataset,
+        "target_dims": target_dims,
+        'scale_scores': args.scale_scores,
+        "level": level,
+        "q": q,
+        'dynamic_pot': args.dynamic_pot,
+        "use_mov_av": args.use_mov_av,
+        "gamma": args.gamma,
+        "reg_level": reg_level,
+        "save_path": save_path,
+    }
+    best_model = trainer.model
+    predictor = Predictor(
+        best_model,
+        window_size,
+        n_features,
+        prediction_args,
+    )
+    stride=1
+    N_windows=(N-window_size)/stride +1
+    #print(f"N_windows:{N_windows}")
+    dropped_points = N_windows % batch_size
+    dropped_points=int(dropped_points)
+    label = y_test[window_size-1:N-dropped_points] if y_test is not None else None
+    #label = y_test[window_size:] 
+    predictor.predict_anomalies(X_train, X_test,label,normalized_anomaly_scores_train,normalized_anomaly_scores_test)
+    plotter(args.dataset,X_test, predictor.recons, predictor.df.to_numpy() ,label)
 
-                #if preds.ndim == 3:
-                    #preds = preds.squeeze(1)
-                #if y.ndim == 3:
-                    #y = y.squeeze(1)
-
-                recon_losses.append(loss.item())       
-        recon_losses = np.array(recon_losses)       
-        recon_loss = np.sqrt((recon_losses ** 2).mean())
-        return recon_loss
-
-    def save(self, file_name):
-        """
-        Pickles the model parameters to be retrieved later
-        :param file_name: the filename to be saved as,`dload` serves as the download directory
-        """
-        PATH = self.dload + "/" + file_name
-        if os.path.exists(self.dload):
-            pass
-        else:
-            os.mkdir(self.dload)
-        torch.save(self.model.state_dict(), PATH)
-
-    def load(self, PATH):
-        """
-        Loads the model's parameters from the path mentioned
-        :param PATH: Should contain pickle file
-        """
-        self.model.load_state_dict(torch.load(PATH, map_location=self.device))
-
-    def write_loss(self, epoch):
-        for key, value in self.losses.items():
-            if len(value) != 0:
-                self.writer.add_scalar(key, value[-1], epoch)
-
+    # Save config
+    args_path = f"{save_path}/config.txt"
+    with open(args_path, "w") as f:
+        json.dump(args.__dict__, f, indent=2)
